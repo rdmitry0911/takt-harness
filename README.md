@@ -237,8 +237,9 @@ takt-harness verify --passport passport.json trial.json
 
 `verify` checks that the bundle is the record the passport asks for: the tool and version, the CPU
 model, the number of measured and warm-up runs, exactly the two pinned builds (by the SHA-256 of
-the executables, under the labels `baseline` and `trial` unless the passport says otherwise), the
-pinned inputs, and one run of each build in every round — a run removed from the record is
+the executables, under the labels `baseline` and `trial` unless the passport says otherwise; a
+build the passport leaves unpinned, such as your program linked with a delivered library, is
+identified in the verdict by the SHA-256 the record shows), the pinned inputs, and one run of each build in every round — a run removed from the record is
 detected. It then computes the passport metric as the factor baseline / trial (ratio of medians,
 95% bootstrap interval) against the threshold, and whether the outputs are equivalent. A record
 supports a decline when it is valid and either the threshold is not met or the outputs differ.

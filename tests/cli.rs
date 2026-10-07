@@ -338,6 +338,15 @@ fn verify_rejects_a_record_that_is_not_the_agreed_one() {
     std::fs::write(&cut, serde_json::to_vec(&edited).unwrap()).unwrap();
     invalid(&good, &cut, "the trial record is not complete");
 
+    // A build the passport leaves unpinned is identified by the hash the record shows.
+    let mut p = good.clone();
+    p["trial"]["sha256"] = Value::Null;
+    p["baseline"].as_object_mut().unwrap().remove("sha256");
+    let v = verify(&p, &out, None);
+    assert_eq!(v["record_valid"], true, "{v}");
+    assert_eq!(v["trial_sha256"], b["commands"][1]["executable"]["sha256"]);
+    assert_eq!(v["baseline_sha256"], b["commands"][0]["executable"]["sha256"]);
+
     // Usage errors.
     assert_eq!(harness(&["verify", out.to_str().unwrap()]).status.code(), Some(2));
     assert_eq!(harness(&["verify", "--passport", out.to_str().unwrap()]).status.code(), Some(2));

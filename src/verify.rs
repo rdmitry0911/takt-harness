@@ -23,11 +23,14 @@ pub const VERDICT_SCHEMA: &str = "takt-trial-verdict/1";
 /// the trial build that still counts as the same build run on the same input.
 pub const INSTRUCTIONS_TOLERANCE: f64 = 0.01;
 
-/// One pinned build: the label it carries in the record and the SHA-256 of its executable.
+/// One build: the label it carries in the record and, when the passport pins it, the SHA-256 of its
+/// executable. An unpinned build (e.g. a program the client links with a delivered library) is
+/// identified in the verdict by the SHA-256 the record shows.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Build {
     pub label: String,
-    pub sha256: String,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// The trial's measurement passport, fixed before the trial starts (agreement clause 3).
@@ -80,6 +83,9 @@ pub struct Verdict {
     pub record_valid: bool,
     pub problems: Vec<String>,
     pub metric: String,
+    /// SHA-256 of the executables the record shows for the baseline and the trial build.
+    pub baseline_sha256: Option<String>,
+    pub trial_sha256: Option<String>,
     pub baseline_median: Option<f64>,
     pub trial_median: Option<f64>,
     /// baseline / trial, ratio of medians.
@@ -158,12 +164,14 @@ pub fn check(p: &Passport, b: &Bundle, reference: Option<&Bundle>, verifier_vers
             problems.push(format!("there is no {role} build labelled '{}' in the record", build.label));
             continue;
         };
-        if c.executable.sha256 != build.sha256 {
-            problems.push(format!(
-                "the {role} build is {}, the passport pins {}",
-                short(&c.executable.sha256),
-                short(&build.sha256)
-            ));
+        if let Some(pinned) = build.sha256.as_deref().filter(|s| !s.is_empty()) {
+            if c.executable.sha256 != pinned {
+                problems.push(format!(
+                    "the {role} build is {}, the passport pins {}",
+                    short(&c.executable.sha256),
+                    short(pinned)
+                ));
+            }
         }
         let rounds: BTreeSet<u32> = c.runs.iter().map(|r| r.round).collect();
         if c.runs.len() != p.reps as usize || rounds != want_rounds {
@@ -209,7 +217,8 @@ pub fn check(p: &Passport, b: &Bundle, reference: Option<&Bundle>, verifier_vers
     let failed_runs = FailedRuns { baseline: base.map(failed).unwrap_or(0), trial: trial.map(failed).unwrap_or(0) };
 
     let reference = reference.map(|r| {
-        let theirs_cmd = r.commands.iter().find(|c| c.executable.sha256 == p.trial.sha256);
+        let sha = trial.map(|c| c.executable.sha256.as_str());
+        let theirs_cmd = r.commands.iter().find(|c| Some(c.executable.sha256.as_str()) == sha);
         let med = |c: &CommandReadings| {
             let v = c.samples("instructions");
             (!v.is_empty()).then(|| stats::median(&v))
@@ -275,6 +284,8 @@ pub fn check(p: &Passport, b: &Bundle, reference: Option<&Bundle>, verifier_vers
         record_valid,
         problems,
         metric: p.metric.clone(),
+        baseline_sha256: base.map(|c| c.executable.sha256.clone()),
+        trial_sha256: trial.map(|c| c.executable.sha256.clone()),
         baseline_median,
         trial_median,
         factor,
