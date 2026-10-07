@@ -92,6 +92,8 @@ takt-harness run [OPTIONS] -- <command> [args...] [::: <command> [args...]]...
 takt-harness compare <baseline.json> <new.json>
 takt-harness compare <readings.json>      first command is the baseline for the others
 takt-harness show <readings.json>         print a bundle, to review it before sending
+takt-harness verify --passport <passport.json> [--reference <provider.json>] <readings.json>
+                                          check a trial record against its passport
 takt-harness --version | --help
 ```
 
@@ -202,6 +204,48 @@ the same; otherwise it says MISMATCH (or CANNOT CHECK when a program's output va
 own runs) and exits with 1, so it can gate a CI job. A speed-up alone is not an acceptance: the
 outputs must match. Comparing bundles from two different machines or settings is flagged under
 `setup`.
+
+### Check a trial record against its passport
+
+A TAKT trial lets you run a build on your own hardware before you pay for it. Its terms are fixed
+in advance in a *trial passport*, a small JSON file you download with the trial: this tool and its
+version, the metric, the threshold, the run protocol, the CPU model, the SHA-256 of your baseline
+and of the trial build, and the SHA-256 of the inputs. Measure both builds in one interleaved
+session with exactly those settings:
+
+```sh
+takt-harness run --reps 9 --warmup 1 --input data --label baseline --label trial \
+    --out trial.json -- bin/my-bench-base ::: bin/my-bench-trial
+takt-harness verify --passport passport.json trial.json
+```
+
+```json
+{
+  "schema": "takt-trial-verdict/1",
+  "record_valid": true,
+  "problems": [],
+  "metric": "cycles",
+  "factor": 1.043,
+  "factor_ci95": [1.031, 1.055],
+  "threshold": 1.1,
+  "threshold_met": false,
+  "equivalent": true,
+  "decline_supported": true,
+  "summary": "The record matches the passport. cycles:u factor 1.0430 [95% CI 1.0310, 1.0550] is below the threshold 1.1000: the record supports the decline."
+}
+```
+
+`verify` checks that the bundle is the record the passport asks for: the tool and version, the CPU
+model, the number of measured and warm-up runs, exactly the two pinned builds (by the SHA-256 of
+the executables, under the labels `baseline` and `trial` unless the passport says otherwise), the
+pinned inputs, and one run of each build in every round — a run removed from the record is
+detected. It then computes the passport metric as the factor baseline / trial (ratio of medians,
+95% bootstrap interval) against the threshold, and whether the outputs are equivalent. A record
+supports a decline when it is valid and either the threshold is not met or the outputs differ.
+Send the bundle unedited, as the tool wrote it. The verdict decides nothing by itself: TAKT checks
+the record against its own run of the same builds, and `--reference` compares the trial build's
+instruction count with that run (the same binary on the same input executes nearly the same
+number of instructions; the tolerance is 1%). Exit status 0 whenever a verdict is printed.
 
 ## Inside VMs, containers and CI
 
@@ -335,6 +379,8 @@ measuring.
 - **Accept the work yourself.** When you receive a build, measure your baseline and the build in one
   interleaved session on your own hardware and run `compare`: it gives the speed-up factor by the
   definition in the Terms and checks that the output is identical.
+- **Trials.** During a trial, `verify` checks your record against the trial passport before you
+  submit it with a decline (see above).
 
 ## Limits
 

@@ -1,6 +1,6 @@
 //! End-to-end tests: the real binary measures `true` and a small busy loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
@@ -216,4 +216,130 @@ fn inputs_are_hashed_and_redaction_hides_text() {
     let b = bundle(&out);
     assert_eq!(b["commands"][0]["label"], "cmd1");
     assert!(b["commands"][0]["argv"].as_array().unwrap().iter().all(|a| a.as_str().unwrap().starts_with("sha256:")));
+}
+
+/// A real two-build trial record: the baseline counts to 20000 in a shell loop, the trial prints the
+/// result directly, both under their pinned labels.
+fn trial_record(name: &str, trial_script: &str) -> (PathBuf, Value) {
+    let out = tmp(name);
+    let input = tmp("trial-input.txt");
+    std::fs::write(&input, "open input\n").unwrap();
+    #[rustfmt::skip]
+    let o = harness(&[
+        "run", "--reps", "5", "--warmup", "1", "--no-counters", "--out", out.to_str().unwrap(),
+        "--input", input.to_str().unwrap(), "--label", "baseline", "--label", "trial",
+        "--", "bash", "-c", BUSY, ":::", "sh", "-c", trial_script,
+    ]);
+    assert!(o.status.success(), "{}", text(&o));
+    let b = bundle(&out);
+    (out, b)
+}
+
+fn passport(b: &Value, threshold: f64) -> Value {
+    serde_json::json!({
+        "schema": "takt-trial-passport/1",
+        "tool": "takt-harness",
+        "version": env!("CARGO_PKG_VERSION"),
+        "metric": "wall_ns",
+        "aggregation": "median",
+        "threshold": threshold,
+        "reps": 5,
+        "warmup": 1,
+        "baseline": {"label": "baseline", "sha256": b["commands"][0]["executable"]["sha256"]},
+        "trial": {"label": "trial", "sha256": b["commands"][1]["executable"]["sha256"]},
+        "inputs_sha256": [b["inputs"][0]["sha256"]],
+        "cpu_model": b["environment"]["cpu"]["model"],
+    })
+}
+
+fn verify(passport: &Value, readings: &Path, reference: Option<&Path>) -> Value {
+    let p = tmp(&format!("passport-{}.json", readings.file_stem().unwrap().to_string_lossy()));
+    std::fs::write(&p, serde_json::to_vec(passport).unwrap()).unwrap();
+    let mut args = vec!["verify", "--passport", p.to_str().unwrap()];
+    if let Some(r) = reference {
+        args.extend(["--reference", r.to_str().unwrap()]);
+    }
+    args.push(readings.to_str().unwrap());
+    let o = harness(&args);
+    assert!(o.status.success(), "{}", text(&o));
+    serde_json::from_slice(&o.stdout).unwrap()
+}
+
+#[test]
+fn verify_trial_record_against_its_passport() {
+    let (out, b) = trial_record("trial-fast.json", "echo 20000");
+    assert_ne!(b["commands"][0]["executable"]["sha256"], b["commands"][1]["executable"]["sha256"]);
+
+    // The record matches; the trial build is far faster and its output is the same: no decline.
+    let v = verify(&passport(&b, 1.10), &out, Some(out.as_path()));
+    assert_eq!(v["schema"], "takt-trial-verdict/1");
+    assert_eq!(v["record_valid"], true, "{v}");
+    assert_eq!(v["equivalent"], true);
+    assert_eq!(v["threshold_met"], true);
+    assert_eq!(v["decline_supported"], false);
+    let f = v["factor"].as_f64().unwrap();
+    assert!(f > 1.10, "{v}");
+    let ci = v["factor_ci95"].as_array().unwrap();
+    assert!(ci[0].as_f64().unwrap() <= f && f <= ci[1].as_f64().unwrap());
+    // Wall time only here, so the instruction cross-check has nothing to compare.
+    assert!(v["reference"]["consistent"].is_null());
+
+    // The same record under a threshold the factor does not reach supports the decline.
+    let v = verify(&passport(&b, 1e9), &out, None);
+    assert_eq!((v["record_valid"].clone(), v["threshold_met"].clone()), (true.into(), false.into()));
+    assert_eq!(v["decline_supported"], true);
+    assert!(v["summary"].as_str().unwrap().contains("supports the decline"));
+}
+
+#[test]
+fn verify_detects_a_different_output() {
+    let (out, b) = trial_record("trial-wrong.json", "echo 19999");
+    let v = verify(&passport(&b, 1.10), &out, None);
+    assert_eq!(v["record_valid"], true, "{v}");
+    assert_eq!(v["threshold_met"], true);
+    assert_eq!(v["equivalent"], false);
+    assert_eq!(v["decline_supported"], true);
+}
+
+#[test]
+fn verify_rejects_a_record_that_is_not_the_agreed_one() {
+    let (out, b) = trial_record("trial-checks.json", "echo 20000");
+    let good = passport(&b, 1.10);
+    let invalid = |p: &Value, readings: &Path, what: &str| {
+        let v = verify(p, readings, None);
+        assert_eq!(v["record_valid"], false, "{what}: {v}");
+        assert_eq!(v["decline_supported"], false, "{what}");
+        let problems = v["problems"].as_array().unwrap();
+        assert!(problems.iter().any(|x| x.as_str().unwrap().contains(what)), "{what}: {v}");
+    };
+    let mut p = good.clone();
+    p["version"] = "0.0.1".into();
+    invalid(&p, &out, "pins 0.0.1");
+    let mut p = good.clone();
+    p["trial"]["sha256"] = "00".repeat(32).into();
+    invalid(&p, &out, "the trial build is");
+    let mut p = good.clone();
+    p["reps"] = 7.into();
+    invalid(&p, &out, "the passport pins 7");
+    let mut p = good.clone();
+    p["cpu_model"] = "Some Other CPU".into();
+    invalid(&p, &out, "Some Other CPU");
+    let mut p = good.clone();
+    p["inputs_sha256"] = serde_json::json!(["11".repeat(32)]);
+    invalid(&p, &out, "of the passport is not in the record");
+    let mut p = good.clone();
+    p["baseline"]["label"] = "base".into();
+    invalid(&p, &out, "no baseline build labelled 'base'");
+
+    // A run removed from the record (e.g. an unfavourable one) is detected.
+    let mut edited = b.clone();
+    edited["commands"][1]["runs"].as_array_mut().unwrap().remove(2);
+    let cut = tmp("trial-cut.json");
+    std::fs::write(&cut, serde_json::to_vec(&edited).unwrap()).unwrap();
+    invalid(&good, &cut, "the trial record is not complete");
+
+    // Usage errors.
+    assert_eq!(harness(&["verify", out.to_str().unwrap()]).status.code(), Some(2));
+    assert_eq!(harness(&["verify", "--passport", out.to_str().unwrap()]).status.code(), Some(2));
+    assert_eq!(harness(&["verify", "--passport", out.to_str().unwrap(), out.to_str().unwrap()]).status.code(), Some(1));
 }

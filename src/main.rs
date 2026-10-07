@@ -11,6 +11,7 @@ mod report;
 mod run;
 mod stats;
 mod sys;
+mod verify;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,8 @@ USAGE
   takt-harness compare <baseline.json> <new.json>
   takt-harness compare <readings.json>      first command is the baseline for the others
   takt-harness show <readings.json>         print a bundle, to review it before sending
+  takt-harness verify --passport <passport.json> [--reference <provider.json>] <readings.json>
+                                            check a trial record against its passport
   takt-harness --version | --help
 
 RUN OPTIONS
@@ -45,7 +48,18 @@ Several commands separated by ':::' are measured in interleaved rounds (listed o
 rounds, reverse on odd). Per run: user-mode cycles and instructions of the command and all its
 child processes, cache-misses and branch-misses where available, wall/user/sys time, peak RSS,
 exit status, SHA-256 of stdout. Nothing leaves the machine; the bundle holds no code and no file
-contents. Exit status: 0 ok, 1 failure or outputs differ (compare), 2 usage error.
+contents.
+
+verify checks that a readings bundle is the record a trial passport asks for (this tool and
+version, CPU model, reps and warm-up, the two pinned builds by SHA-256, the pinned inputs, every
+measured run of every round) and prints a JSON verdict: the passport metric as a factor
+baseline / trial with a 95% bootstrap interval, whether it meets the passport threshold, whether
+the outputs are equivalent, and whether the record supports declining the trial build. With
+--reference (the provider's own run of the same builds) it also compares the instruction count of
+the trial build.
+
+Exit status: 0 ok (verify: a verdict was printed), 1 failure or outputs differ (compare),
+2 usage error.
 ";
 
 fn usage(msg: &str) -> ExitCode {
@@ -175,6 +189,26 @@ fn main() -> ExitCode {
                 report::print_bundle(&b);
                 0
             }))
+        }
+        "verify" => {
+            let (mut passport, mut reference, mut readings) = (None, None, Vec::new());
+            let mut it = args.into_iter();
+            while let Some(a) = it.next() {
+                match a.to_str() {
+                    Some("--passport") => passport = it.next(),
+                    Some("--reference") => reference = it.next(),
+                    _ => readings.push(a),
+                }
+            }
+            let (Some(passport), [readings]) = (passport, readings.as_slice()) else {
+                return usage("verify takes --passport <passport.json> [--reference <provider.json>] <readings.json>");
+            };
+            exit(verify::verify(
+                Path::new(&passport),
+                Path::new(readings),
+                reference.as_deref().map(Path::new),
+                VERSION,
+            ))
         }
         other => usage(&format!("unknown command '{other}'")),
     }
