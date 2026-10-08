@@ -398,5 +398,5 @@ MIT, see `LICENSE`. Copyright (c) 2026 ABX DEVELOPMENT LLP (TAKT, https://taktcy
 ## Updates
 
 Reproducible measurement examples and integration notes are published in the
-[TAKT Telegram channel](https://t.me/taktcycles), in English with Russian summaries.
+[TAKT Telegram channel](https://t.me/taktcycles). Posts are in English.
 TAKT is a commercial service; the measurement harness is open source under the MIT license.
